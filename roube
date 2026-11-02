@@ -1,0 +1,1142 @@
+--[[
+    Roube um Exu v2 | WindUI Preto & Branco
+    Abas: Farm | Player | Tools | Config
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+local TeleportService = game:GetService("TeleportService")
+local VirtualUser = game:GetService("VirtualUser")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LP = Players.LocalPlayer
+
+-- evita executar duas vezes
+pcall(function()
+    if getgenv and getgenv().ExuUnload then getgenv().ExuUnload() end
+end)
+
+--------------------------------------------------------------------
+-- WindUI
+--------------------------------------------------------------------
+local ok, WindUI = pcall(function()
+    return loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+end)
+if not ok or not WindUI then
+    warn("[Exu] Falha ao carregar a WindUI.")
+    return
+end
+
+pcall(function()
+    WindUI:AddTheme({
+        Name = "PretoBranco",
+        Accent = Color3.fromHex("#ffffff"),
+        Dialog = Color3.fromHex("#0a0a0a"),
+        Outline = Color3.fromHex("#ffffff"),
+        Text = Color3.fromHex("#ffffff"),
+        Placeholder = Color3.fromHex("#8a8a8a"),
+        Background = Color3.fromHex("#000000"),
+        Button = Color3.fromHex("#1c1c1c"),
+        Icon = Color3.fromHex("#ffffff"),
+    })
+    WindUI:SetTheme("PretoBranco")
+end)
+
+--------------------------------------------------------------------
+-- Dados do jogo (raridades pela ordem das fotos)
+--------------------------------------------------------------------
+local Tiers = { "Comum", "Incomum", "Raro", "Épico", "Lendário", "Mítico", "Secreto", "Divino", "Celestial" }
+local TierRank = {}
+for i, n in ipairs(Tiers) do TierRank[n] = i end
+
+-- {trecho do nome em minusculo, raridade}. Edite aqui se algum nome estiver na raridade errada.
+local NameTier = {
+    { "mirim", "Comum" },
+    { "caveira", "Incomum" },
+    { "da mata", "Raro" },
+    { "pombagira", "Épico" },
+    { "padilha", "Épico" },
+    { "pilintra", "Épico" },
+    { "labareda", "Lendário" },
+    { "ventania", "Mítico" },
+    { "brasa", "Mítico" },
+    { "meia-noite", "Mítico" },
+    { "do ouro", "Secreto" },
+    { "mulambo", "Secreto" },
+    { "veludo", "Divino" },
+    { "neon", "Celestial" },
+}
+
+local Sizes = { "Pequeno", "Médio", "Grande", "Enorme", "Colossal" }
+local SizeKey = { Pequeno = "P", ["Médio"] = "M", Grande = "G", Enorme = "E", Colossal = "C" }
+
+local MODE_BEST = "Melhor (⚡ maior)"
+local MODE_RARE = "Maior raridade"
+local MODE_NEAR = "Mais próximo"
+
+--------------------------------------------------------------------
+-- Estado
+--------------------------------------------------------------------
+local S = {
+    Speed = 200,
+    Mode = MODE_BEST,
+    Tiers = {},
+    Sizes = {},
+    ActionKeys = { "roubar", "steal" },
+    AutoSteal = false,
+    Busy = false,
+    Moving = false,
+    Cancel = false,
+    Unloaded = false,
+    Delay = 1,
+    Exclude = 45,
+    Notify = true,
+    -- plot
+    ManualPlot = nil, Spawned = nil, OwnPlot = nil, Initial = nil,
+    -- farm de velocidade
+    SpeedFarm = false, SpeedPos = nil, SpeedLeash = 12, SpeedDir = "Frente",
+    -- player
+    WSOn = false, WS = 50, JPOn = false, JP = 100,
+    NoClip = false, InfJump = false,
+    Fly = false, FlySpeed = 80,
+    GravOn = false, Grav = 100, FOVOn = false, FOV = 90,
+    Fullbright = false,
+    -- tools
+    InstantPrompt = false, RangeOn = false, Range = 40,
+    AutoPrompt = false, AutoKeys = { "coletar", "collect", "claim", "resgatar" }, AutoRange = 40,
+    ESP = false,
+}
+
+local Conns = {}
+local function bind(c) table.insert(Conns, c) return c end
+
+local lastNotify = {}
+local function notify(title, content)
+    if not S.Notify then return end
+    local key = title .. content
+    if lastNotify[key] and tick() - lastNotify[key] < 4 then return end
+    lastNotify[key] = tick()
+    pcall(function()
+        WindUI:Notify({ Title = title, Content = content, Duration = 3 })
+    end)
+end
+
+local function getHRP()
+    local c = LP.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function getHum()
+    local c = LP.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+--------------------------------------------------------------------
+-- Numeros abreviados (32K, 1.2M, 4Qa ...)
+--------------------------------------------------------------------
+local Suffix = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, Qa = 1e15, Qi = 1e18, Sx = 1e21, Sp = 1e24, Oc = 1e27, No = 1e30, Dc = 1e33 }
+local Units = {
+    { 1e33, "Dc" }, { 1e30, "No" }, { 1e27, "Oc" }, { 1e24, "Sp" }, { 1e21, "Sx" }, { 1e18, "Qi" },
+    { 1e15, "Qa" }, { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" },
+}
+
+local function parseAbbrev(txt)
+    if type(txt) ~= "string" or #txt > 14 then return nil end
+    local clean = (txt:gsub("[^%w%.,]", ""))
+    local num, suf = clean:match("^([%d%.,]+)(%a*)$")
+    if not num then return nil end
+    local n = tonumber((num:gsub(",", "")))
+    if not n then return nil end
+    local mult = 1
+    if suf ~= "" then
+        mult = Suffix[suf]
+        if not mult then return nil end
+    end
+    return n * mult
+end
+
+local function fmt(n)
+    if not n then return "?" end
+    for _, u in ipairs(Units) do
+        if n >= u[1] then return ("%.3g%s"):format(n / u[1], u[2]) end
+    end
+    return tostring(math.floor(n))
+end
+
+--------------------------------------------------------------------
+-- Cache de ProximityPrompts
+--------------------------------------------------------------------
+local Prompts = {}
+for _, d in ipairs(workspace:GetDescendants()) do
+    if d:IsA("ProximityPrompt") then Prompts[d] = true end
+end
+bind(workspace.DescendantAdded:Connect(function(d)
+    if d:IsA("ProximityPrompt") then Prompts[d] = true end
+end))
+bind(workspace.DescendantRemoving:Connect(function(d)
+    if d:IsA("ProximityPrompt") then Prompts[d] = nil end
+end))
+
+local function promptPos(p)
+    local par = p.Parent
+    if not par then return nil end
+    if par:IsA("Attachment") then return par.WorldPosition end
+    if par:IsA("BasePart") then return par.Position end
+    if par:IsA("Model") then return par:GetPivot().Position end
+    return nil
+end
+
+--------------------------------------------------------------------
+-- Plot (seu spawn)
+--------------------------------------------------------------------
+local function ownedByMe(inst)
+    for _, k in ipairs({ "Owner", "OwnerId", "OwnerUserId", "UserId", "Player" }) do
+        local a = inst:GetAttribute(k)
+        if a ~= nil and (a == LP.UserId or a == LP.Name or a == LP.DisplayName or tostring(a) == tostring(LP.UserId)) then
+            return true
+        end
+        local c = inst:FindFirstChild(k)
+        if c and c:IsA("ValueBase") then
+            local v = c.Value
+            if v == LP or v == LP.UserId or v == LP.Name or v == LP.DisplayName then return true end
+        end
+    end
+    return inst.Name == LP.Name or inst.Name == LP.DisplayName
+end
+
+local function detectOwnPlot()
+    for _, top in ipairs(workspace:GetChildren()) do
+        if not Players:GetPlayerFromCharacter(top) then
+            local found = ownedByMe(top) and top
+            if not found then
+                for _, sub in ipairs(top:GetChildren()) do
+                    if ownedByMe(sub) then found = sub break end
+                end
+            end
+            if found then
+                for _, d in ipairs(found:GetDescendants()) do
+                    if d:IsA("BasePart") and d.Name:lower():find("spawn") then return d.Position end
+                end
+                return found:GetPivot().Position
+            end
+        end
+    end
+    return nil
+end
+
+local function getHome()
+    if S.ManualPlot then return S.ManualPlot, "manual" end
+    local rl = LP.RespawnLocation
+    if rl and rl:IsA("BasePart") then return rl.Position, "RespawnLocation" end
+    if S.Spawned then return S.Spawned, "spawn registrado" end
+    if S.OwnPlot then return S.OwnPlot, "plot por dono" end
+    if S.Initial then return S.Initial, "posição ao executar" end
+    return nil, "nenhum"
+end
+
+task.spawn(function()
+    local hrp = getHRP()
+    if not hrp then
+        LP.CharacterAdded:Wait()
+        task.wait(1)
+        hrp = getHRP()
+    end
+    if hrp then S.Initial = hrp.Position end
+    local ok2, res = pcall(detectOwnPlot)
+    if ok2 then S.OwnPlot = res end
+end)
+
+bind(LP.CharacterAdded:Connect(function(char)
+    local hrp = char:WaitForChild("HumanoidRootPart", 10)
+    if hrp then
+        task.wait(1)
+        if getHRP() == hrp then S.Spawned = hrp.Position end
+    end
+end))
+
+--------------------------------------------------------------------
+-- Alvos
+--------------------------------------------------------------------
+local function parseObjectText(ot)
+    ot = ot or ""
+    local name, size = ot:match("^(.-)%s*%((.-)%)%s*$")
+    if not name then name, size = ot, "" end
+    return name, size
+end
+
+local function tierOf(name)
+    local low = name:lower()
+    for _, e in ipairs(NameTier) do
+        if low:find(e[1], 1, true) then return e[2] end
+    end
+    return nil
+end
+
+local IncomeCache = {}
+local function readIncome(prompt)
+    local c = IncomeCache[prompt]
+    if c and tick() - c.t < 5 then return c.v end
+    local anc = prompt.Parent
+    local best
+    for _ = 1, 4 do
+        if not anc or anc == workspace then break end
+        for _, d in ipairs(anc:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local v = parseAbbrev(d.Text)
+                if v and (not best or v > best) then best = v end
+            end
+        end
+        if best then break end
+        anc = anc.Parent
+    end
+    IncomeCache[prompt] = { v = best, t = tick() }
+    return best
+end
+
+local function hasAny(set)
+    for _ in pairs(set) do return true end
+    return false
+end
+
+local Blacklist = {}
+
+local function actionMatches(pr)
+    local a = pr.ActionText:lower()
+    for _, k in ipairs(S.ActionKeys) do
+        if k ~= "" and a:find(k, 1, true) then return true end
+    end
+    return false
+end
+
+local function scanTargets()
+    local list = {}
+    local hrp = getHRP()
+    local home = getHome()
+    local filterTier, filterSize = hasAny(S.Tiers), hasAny(S.Sizes)
+    for pr in pairs(Prompts) do
+        if pr.Parent and pr.Enabled and actionMatches(pr)
+            and not (Blacklist[pr] and Blacklist[pr] > tick())
+            and not (LP.Character and pr:IsDescendantOf(LP.Character)) then
+            local pos = promptPos(pr)
+            if pos and not (home and S.Exclude > 0 and (pos - home).Magnitude < S.Exclude) then
+                local name, size = parseObjectText(pr.ObjectText)
+                if name == "" then
+                    local m = pr:FindFirstAncestorOfClass("Model")
+                    name = m and m.Name or "?"
+                end
+                local tier = tierOf(name) or "?"
+                local okTier = (not filterTier) or S.Tiers[tier]
+                local okSize = true
+                if filterSize then
+                    okSize = false
+                    local key = size:sub(1, 1):upper()
+                    for s in pairs(S.Sizes) do
+                        if SizeKey[s] == key then okSize = true break end
+                    end
+                end
+                if okTier and okSize then
+                    table.insert(list, {
+                        prompt = pr,
+                        pos = pos,
+                        name = name,
+                        size = size,
+                        tier = tier,
+                        rank = TierRank[tier] or 0,
+                        income = readIncome(pr) or 0,
+                        dist = hrp and (hrp.Position - pos).Magnitude or 0,
+                    })
+                end
+            end
+        end
+    end
+    return list
+end
+
+local function sortTargets(list)
+    table.sort(list, function(a, b)
+        if S.Mode == MODE_NEAR then return a.dist < b.dist end
+        if S.Mode == MODE_RARE then
+            if a.rank ~= b.rank then return a.rank > b.rank end
+            if a.income ~= b.income then return a.income > b.income end
+            return a.dist < b.dist
+        end
+        if a.income ~= b.income then return a.income > b.income end
+        if a.rank ~= b.rank then return a.rank > b.rank end
+        return a.dist < b.dist
+    end)
+end
+
+local function pickTarget()
+    local list = scanTargets()
+    if #list == 0 then return nil end
+    sortTargets(list)
+    return list[1]
+end
+
+--------------------------------------------------------------------
+-- Movimento (velocidade configuravel)
+--------------------------------------------------------------------
+local function flyTo(pos)
+    if not getHRP() then return false end
+    S.Moving = true
+    local reached = true
+    while true do
+        local hrp = getHRP()
+        if not hrp or S.Cancel or S.Unloaded then reached = false break end
+        local delta = pos - hrp.Position
+        local dist = delta.Magnitude
+        if dist < 1.5 then break end
+        local dt = RunService.Heartbeat:Wait()
+        hrp = getHRP()
+        if not hrp then reached = false break end
+        local step = math.min(S.Speed * dt, dist)
+        hrp.CFrame = CFrame.new(hrp.Position + delta.Unit * step) * (hrp.CFrame - hrp.CFrame.Position)
+        hrp.AssemblyLinearVelocity = Vector3.zero
+    end
+    S.Moving = false
+    return reached
+end
+
+bind(RunService.Stepped:Connect(function()
+    if S.NoClip or S.Moving then
+        local c = LP.Character
+        if c then
+            for _, p in ipairs(c:GetDescendants()) do
+                if p:IsA("BasePart") then p.CanCollide = false end
+            end
+        end
+    end
+end))
+
+--------------------------------------------------------------------
+-- Roubar
+--------------------------------------------------------------------
+local StatusPara
+
+local function setStatus(txt)
+    if StatusPara then pcall(function() StatusPara:SetDesc(txt) end) end
+end
+
+local function activatePrompt(pr)
+    local oh, od, ol = pr.HoldDuration, pr.MaxActivationDistance, pr.RequiresLineOfSight
+    pcall(function()
+        pr.HoldDuration = 0
+        pr.MaxActivationDistance = 60
+        pr.RequiresLineOfSight = false
+    end)
+    for _ = 1, 4 do
+        if not pr.Parent then break end
+        pcall(function() fireproximityprompt(pr) end)
+        pcall(function()
+            pr:InputHoldBegin()
+            task.wait(math.max(oh, 0.1))
+            pr:InputHoldEnd()
+        end)
+        task.wait(0.2)
+        if not pr.Parent or not pr.Enabled then break end
+    end
+    pcall(function()
+        if pr.Parent then
+            pr.HoldDuration, pr.MaxActivationDistance, pr.RequiresLineOfSight = oh, od, ol
+        end
+    end)
+end
+
+local function stealOnce()
+    if S.Busy then return end
+    S.Busy = true
+    S.Cancel = false
+    local good, err = pcall(function()
+        local home, src = getHome()
+        if not home then
+            notify("Farm", "Plot não encontrado. Use Config > Redetectar plot.")
+            return
+        end
+        local t = pickTarget()
+        if not t then
+            setStatus("Nenhum alvo encontrado.")
+            notify("Farm", "Nenhum alvo encontrado.")
+            return
+        end
+        Blacklist[t.prompt] = tick() + 10
+        setStatus(("Indo: %s (%s, %s) ⚡%s"):format(t.name, t.size, t.tier, fmt(t.income)))
+        if not flyTo(t.pos + Vector3.new(0, 3, 0)) then return end
+        activatePrompt(t.prompt)
+        setStatus("Voltando ao plot (" .. src .. ")")
+        flyTo(home + Vector3.new(0, 3, 0))
+        setStatus("Pronto. Último: " .. t.name .. " ⚡" .. fmt(t.income))
+    end)
+    if not good then warn("[Exu] Erro: " .. tostring(err)) end
+    S.Busy = false
+end
+
+task.spawn(function()
+    while not S.Unloaded do
+        if S.AutoSteal and not S.Busy then stealOnce() end
+        task.wait(S.Delay)
+    end
+end)
+
+--------------------------------------------------------------------
+-- Farm de velocidade (esteira)
+--------------------------------------------------------------------
+local DirVec = {
+    ["Frente"] = Vector3.new(0, 0, -1),
+    ["Trás"] = Vector3.new(0, 0, 1),
+    ["Esquerda"] = Vector3.new(-1, 0, 0),
+    ["Direita"] = Vector3.new(1, 0, 0),
+}
+
+bind(RunService.RenderStepped:Connect(function()
+    if S.SpeedFarm and not S.Busy and S.SpeedPos then
+        local hrp, hum = getHRP(), getHum()
+        if hrp and hum then
+            if (hrp.Position - S.SpeedPos).Magnitude > S.SpeedLeash then
+                hrp.CFrame = CFrame.new(S.SpeedPos)
+                hrp.AssemblyLinearVelocity = Vector3.zero
+            end
+            hum:Move(DirVec[S.SpeedDir] or DirVec["Frente"], true)
+        end
+    end
+end))
+
+local function findTreadmill()
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("BasePart") then
+            local n = d.Name:lower()
+            if n:find("esteira") or n:find("treadmill") or n:find("conveyor") then
+                return d.Position + Vector3.new(0, d.Size.Y / 2 + 3, 0), d:GetFullName()
+            end
+        end
+    end
+    return nil
+end
+
+--------------------------------------------------------------------
+-- Player: WalkSpeed, Jump, Fly, Gravidade, FOV, Fullbright
+--------------------------------------------------------------------
+bind(UIS.JumpRequest:Connect(function()
+    if S.InfJump then
+        local h = getHum()
+        if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end
+end))
+
+local origLight = {
+    Brightness = Lighting.Brightness, ClockTime = Lighting.ClockTime, FogEnd = Lighting.FogEnd,
+    GlobalShadows = Lighting.GlobalShadows, Ambient = Lighting.Ambient,
+}
+local origGravity = workspace.Gravity
+
+bind(RunService.Heartbeat:Connect(function()
+    local hum, hrp = getHum(), getHRP()
+    if hum then
+        if S.WSOn then hum.WalkSpeed = S.WS end
+        if S.JPOn then
+            hum.UseJumpPower = true
+            hum.JumpPower = S.JP
+        end
+    end
+    if S.GravOn then workspace.Gravity = S.Grav end
+    if S.FOVOn and workspace.CurrentCamera then workspace.CurrentCamera.FieldOfView = S.FOV end
+    if S.Fullbright then
+        Lighting.Brightness = 2
+        Lighting.ClockTime = 14
+        Lighting.FogEnd = 1e6
+        Lighting.GlobalShadows = false
+        Lighting.Ambient = Color3.new(1, 1, 1)
+    end
+    if S.Fly and hum and hrp and not S.Moving then
+        local cam = workspace.CurrentCamera
+        local md = hum.MoveDirection
+        if md.Magnitude > 0 then
+            local lv = cam.CFrame:VectorToObjectSpace(md)
+            local dir = cam.CFrame.LookVector * (-lv.Z) + cam.CFrame.RightVector * lv.X
+            hrp.AssemblyLinearVelocity = dir * S.FlySpeed
+        else
+            hrp.AssemblyLinearVelocity = Vector3.zero
+        end
+    end
+end))
+
+bind(LP.Idled:Connect(function()
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new())
+end))
+
+--------------------------------------------------------------------
+-- Tools: prompt instantaneo, alcance, auto prompts
+--------------------------------------------------------------------
+local OrigPrompt = setmetatable({}, { __mode = "k" })
+
+local function restorePrompts()
+    for pr, o in pairs(OrigPrompt) do
+        if pr.Parent then
+            pcall(function()
+                pr.HoldDuration = o.hold
+                pr.MaxActivationDistance = o.dist
+                pr.RequiresLineOfSight = o.los
+            end)
+        end
+    end
+    OrigPrompt = setmetatable({}, { __mode = "k" })
+end
+
+task.spawn(function()
+    while not S.Unloaded do
+        if S.InstantPrompt or S.RangeOn then
+            for pr in pairs(Prompts) do
+                if pr.Parent then
+                    if not OrigPrompt[pr] then
+                        OrigPrompt[pr] = { hold = pr.HoldDuration, dist = pr.MaxActivationDistance, los = pr.RequiresLineOfSight }
+                    end
+                    if S.InstantPrompt then pr.HoldDuration = 0 end
+                    if S.RangeOn then
+                        pr.MaxActivationDistance = S.Range
+                        pr.RequiresLineOfSight = false
+                    end
+                end
+            end
+        end
+        task.wait(1)
+    end
+end)
+
+task.spawn(function()
+    while not S.Unloaded do
+        if S.AutoPrompt then
+            local hrp = getHRP()
+            if hrp then
+                for pr in pairs(Prompts) do
+                    if pr.Parent and pr.Enabled and not actionMatches(pr) then
+                        local txt = (pr.ActionText .. " " .. pr.ObjectText):lower()
+                        local hit = false
+                        for _, k in ipairs(S.AutoKeys) do
+                            if k ~= "" and txt:find(k, 1, true) then hit = true break end
+                        end
+                        local pos = hit and promptPos(pr)
+                        if pos and (pos - hrp.Position).Magnitude <= S.AutoRange then
+                            local old = pr.MaxActivationDistance
+                            pr.MaxActivationDistance = math.max(old, S.AutoRange)
+                            pcall(function() fireproximityprompt(pr) end)
+                            pr.MaxActivationDistance = old
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(1)
+    end
+end)
+
+--------------------------------------------------------------------
+-- ESP
+--------------------------------------------------------------------
+local ESPObjs = {}
+local function clearESP()
+    for k, h in pairs(ESPObjs) do
+        pcall(function() h:Destroy() end)
+        ESPObjs[k] = nil
+    end
+end
+
+task.spawn(function()
+    while not S.Unloaded do
+        if S.ESP then
+            local list = scanTargets()
+            sortTargets(list)
+            local keep = {}
+            for i, t in ipairs(list) do
+                local model = t.prompt:FindFirstAncestorOfClass("Model")
+                if model then
+                    keep[model] = true
+                    local h = ESPObjs[model]
+                    if not h or not h.Parent then
+                        h = Instance.new("Highlight")
+                        h.OutlineColor = Color3.new(0, 0, 0)
+                        h.Parent = model
+                        ESPObjs[model] = h
+                    end
+                    h.FillColor = Color3.new(1, 1, 1)
+                    h.FillTransparency = (i == 1) and 0.1 or 0.65
+                end
+            end
+            for m, h in pairs(ESPObjs) do
+                if not keep[m] then
+                    pcall(function() h:Destroy() end)
+                    ESPObjs[m] = nil
+                end
+            end
+        end
+        task.wait(1.5)
+    end
+end)
+
+--------------------------------------------------------------------
+-- Utilidades de debug
+--------------------------------------------------------------------
+local function copy(text)
+    if setclipboard then setclipboard(text) end
+end
+
+--------------------------------------------------------------------
+-- Interface
+--------------------------------------------------------------------
+local Window = WindUI:CreateWindow({
+    Title = "Roube um Exu",
+    Icon = "skull",
+    Author = "Preto & Branco",
+    Folder = "RoubeUmExu",
+    Size = UDim2.fromOffset(580, 460),
+    Theme = "PretoBranco",
+    Resizable = true,
+    SideBarWidth = 170,
+})
+pcall(function() Window:SetToggleKey(Enum.KeyCode.RightShift) end)
+
+local Toggles = {}
+local function toggle(tab, key, title, desc, default, cb)
+    local t = tab:Toggle({
+        Title = title, Desc = desc, Value = default, Default = default,
+        Callback = cb,
+    })
+    Toggles[key] = t
+    return t
+end
+
+local function stopAll()
+    S.Cancel = true
+    S.AutoSteal = false
+    S.SpeedFarm = false
+    for _, k in ipairs({ "auto", "speed" }) do
+        pcall(function() Toggles[k]:Set(false) end)
+    end
+    task.delay(0.5, function() S.Cancel = false end)
+end
+
+----------------------------------------------------------------
+-- FARM
+----------------------------------------------------------------
+local Farm = Window:Tab({ Title = "Farm", Icon = "swords" })
+
+Farm:Section({ Title = "Farm de Exu" })
+
+StatusPara = Farm:Paragraph({ Title = "Status", Desc = "Parado." })
+
+Farm:Dropdown({
+    Title = "Raridades (vazio = todas)",
+    Values = Tiers,
+    Value = {},
+    Multi = true,
+    AllowNone = true,
+    Callback = function(opt)
+        S.Tiers = {}
+        if type(opt) == "table" then
+            for _, v in ipairs(opt) do S.Tiers[v] = true end
+        end
+    end,
+})
+
+Farm:Dropdown({
+    Title = "Tamanhos (vazio = todos)",
+    Values = Sizes,
+    Value = {},
+    Multi = true,
+    AllowNone = true,
+    Callback = function(opt)
+        S.Sizes = {}
+        if type(opt) == "table" then
+            for _, v in ipairs(opt) do S.Sizes[v] = true end
+        end
+    end,
+})
+
+Farm:Dropdown({
+    Title = "Qual pegar",
+    Values = { MODE_BEST, MODE_RARE, MODE_NEAR },
+    Value = MODE_BEST,
+    Callback = function(opt) S.Mode = opt end,
+})
+
+Farm:Slider({
+    Title = "Velocidade até o plot",
+    Step = 1,
+    Value = { Min = 16, Max = 500, Default = 200 },
+    Callback = function(v) S.Speed = v end,
+})
+
+Farm:Button({
+    Title = "Roubar o melhor agora",
+    Callback = function() task.spawn(stealOnce) end,
+})
+
+toggle(Farm, "auto", "Auto roubar (loop)", "Pega o melhor alvo e volta ao plot, repetindo.", false, function(v)
+    S.AutoSteal = v
+end)
+
+Farm:Button({ Title = "Parar tudo", Callback = stopAll })
+
+Farm:Toggle({
+    Title = "ESP dos alvos",
+    Desc = "Destaca os alvos filtrados; o melhor fica mais forte.",
+    Value = false, Default = false,
+    Callback = function(v)
+        S.ESP = v
+        if not v then clearESP() end
+    end,
+})
+
+Farm:Section({ Title = "Farm de velocidade (esteira)" })
+
+Farm:Button({
+    Title = "Salvar posição da esteira (fique em cima dela)",
+    Callback = function()
+        local hrp = getHRP()
+        if hrp then
+            S.SpeedPos = hrp.Position
+            notify("Esteira", "Posição salva.")
+        end
+    end,
+})
+
+Farm:Button({
+    Title = "Tentar achar a esteira sozinho",
+    Callback = function()
+        local pos, path = findTreadmill()
+        if pos then
+            S.SpeedPos = pos
+            notify("Esteira", "Achei: " .. path)
+        else
+            notify("Esteira", "Não achei. Salve a posição manualmente.")
+        end
+    end,
+})
+
+Farm:Dropdown({
+    Title = "Direção de corrida",
+    Values = { "Frente", "Trás", "Esquerda", "Direita" },
+    Value = "Frente",
+    Callback = function(opt) S.SpeedDir = opt end,
+})
+
+Farm:Slider({
+    Title = "Distância máx. antes de voltar pra esteira",
+    Step = 1,
+    Value = { Min = 4, Max = 60, Default = 12 },
+    Callback = function(v) S.SpeedLeash = v end,
+})
+
+toggle(Farm, "speed", "Farm de velocidade", "Fica correndo na esteira e volta pra posição salva se sair.", false, function(v)
+    if v and not S.SpeedPos then
+        notify("Esteira", "Salve a posição da esteira primeiro.")
+    end
+    S.SpeedFarm = v
+end)
+
+----------------------------------------------------------------
+-- PLAYER
+----------------------------------------------------------------
+local Pl = Window:Tab({ Title = "Player", Icon = "user" })
+
+Pl:Section({ Title = "Movimento" })
+
+Pl:Slider({
+    Title = "WalkSpeed",
+    Step = 1,
+    Value = { Min = 16, Max = 300, Default = 50 },
+    Callback = function(v) S.WS = v end,
+})
+Pl:Toggle({ Title = "Aplicar WalkSpeed", Value = false, Default = false, Callback = function(v)
+    S.WSOn = v
+    if not v then local h = getHum() if h then h.WalkSpeed = 16 end end
+end })
+
+Pl:Slider({
+    Title = "JumpPower",
+    Step = 1,
+    Value = { Min = 50, Max = 400, Default = 100 },
+    Callback = function(v) S.JP = v end,
+})
+Pl:Toggle({ Title = "Aplicar JumpPower", Value = false, Default = false, Callback = function(v)
+    S.JPOn = v
+    if not v then local h = getHum() if h then h.JumpPower = 50 end end
+end })
+
+Pl:Toggle({ Title = "Pulo infinito", Value = false, Default = false, Callback = function(v) S.InfJump = v end })
+Pl:Toggle({ Title = "Noclip", Value = false, Default = false, Callback = function(v) S.NoClip = v end })
+
+Pl:Section({ Title = "Voo" })
+
+Pl:Slider({
+    Title = "Velocidade do voo",
+    Step = 1,
+    Value = { Min = 10, Max = 300, Default = 80 },
+    Callback = function(v) S.FlySpeed = v end,
+})
+Pl:Toggle({ Title = "Voar (anda na direção da câmera)", Value = false, Default = false, Callback = function(v) S.Fly = v end })
+
+Pl:Section({ Title = "Mundo e câmera" })
+
+Pl:Slider({
+    Title = "Gravidade",
+    Step = 1,
+    Value = { Min = 0, Max = 400, Default = 100 },
+    Callback = function(v) S.Grav = v end,
+})
+Pl:Toggle({ Title = "Aplicar gravidade", Value = false, Default = false, Callback = function(v)
+    S.GravOn = v
+    if not v then workspace.Gravity = origGravity end
+end })
+
+Pl:Slider({
+    Title = "FOV",
+    Step = 1,
+    Value = { Min = 40, Max = 120, Default = 90 },
+    Callback = function(v) S.FOV = v end,
+})
+Pl:Toggle({ Title = "Aplicar FOV", Value = false, Default = false, Callback = function(v)
+    S.FOVOn = v
+    if not v and workspace.CurrentCamera then workspace.CurrentCamera.FieldOfView = 70 end
+end })
+
+Pl:Toggle({ Title = "Fullbright (sempre claro)", Value = false, Default = false, Callback = function(v)
+    S.Fullbright = v
+    if not v then
+        for k, val in pairs(origLight) do pcall(function() Lighting[k] = val end) end
+    end
+end })
+
+Pl:Section({ Title = "Outros" })
+
+Pl:Button({ Title = "Resetar personagem", Callback = function()
+    local h = getHum()
+    if h then h.Health = 0 end
+end })
+Pl:Button({ Title = "Reentrar no servidor", Callback = function()
+    pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
+end })
+Pl:Paragraph({ Title = "Anti AFK", Desc = "Sempre ativo." })
+
+----------------------------------------------------------------
+-- TOOLS
+----------------------------------------------------------------
+local Tl = Window:Tab({ Title = "Tools", Icon = "wrench" })
+
+Tl:Paragraph({
+    Title = "Sobre dinheiro e velocidade",
+    Desc = "O valor real de dinheiro/velocidade fica no servidor e não dá pra editar pelo cliente. Aqui ficam ferramentas que aceleram o que o jogo já permite.",
+})
+
+Tl:Section({ Title = "Prompts" })
+
+Tl:Toggle({ Title = "Prompt instantâneo (sem segurar)", Value = false, Default = false, Callback = function(v)
+    S.InstantPrompt = v
+    if not v and not S.RangeOn then restorePrompts() end
+end })
+
+Tl:Slider({
+    Title = "Alcance dos prompts",
+    Step = 1,
+    Value = { Min = 10, Max = 150, Default = 40 },
+    Callback = function(v) S.Range = v end,
+})
+Tl:Toggle({ Title = "Aplicar alcance maior", Value = false, Default = false, Callback = function(v)
+    S.RangeOn = v
+    if not v and not S.InstantPrompt then restorePrompts() end
+end })
+
+Tl:Section({ Title = "Auto coletar" })
+
+Tl:Input({
+    Title = "Palavras dos prompts (separadas por vírgula)",
+    Value = table.concat(S.AutoKeys, ","),
+    Placeholder = "coletar,collect,claim",
+    Callback = function(text)
+        S.AutoKeys = {}
+        for w in tostring(text):gmatch("[^,]+") do
+            table.insert(S.AutoKeys, (w:gsub("^%s+", ""):gsub("%s+$", ""):lower()))
+        end
+    end,
+})
+Tl:Slider({
+    Title = "Raio do auto coletar",
+    Step = 1,
+    Value = { Min = 10, Max = 150, Default = 40 },
+    Callback = function(v) S.AutoRange = v end,
+})
+Tl:Toggle({ Title = "Auto acionar prompts por palavra", Desc = "Aciona sozinho os prompts próximos que tiverem essas palavras.", Value = false, Default = false, Callback = function(v)
+    S.AutoPrompt = v
+end })
+
+Tl:Section({ Title = "Achar o que dá dinheiro/velocidade" })
+
+Tl:Button({
+    Title = "Copiar lista de Remotes",
+    Callback = function()
+        local out = {}
+        for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+            if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") or d:IsA("UnreliableRemoteEvent") then
+                table.insert(out, d.ClassName .. " | " .. d:GetFullName())
+            end
+        end
+        copy(table.concat(out, "\n"))
+        notify("Tools", #out .. " remotes copiados.")
+    end,
+})
+
+Tl:Button({
+    Title = "Copiar valores do jogador (stats)",
+    Callback = function()
+        local out = {}
+        for k, v in pairs(LP:GetAttributes()) do
+            table.insert(out, "Attr " .. k .. " = " .. tostring(v))
+        end
+        for _, d in ipairs(LP:GetDescendants()) do
+            if d:IsA("ValueBase") then
+                table.insert(out, d:GetFullName() .. " = " .. tostring(d.Value))
+            end
+        end
+        copy(table.concat(out, "\n"))
+        notify("Tools", #out .. " valores copiados.")
+    end,
+})
+
+----------------------------------------------------------------
+-- CONFIG
+----------------------------------------------------------------
+local Cf = Window:Tab({ Title = "Config", Icon = "settings" })
+
+Cf:Section({ Title = "Plot" })
+
+Cf:Button({
+    Title = "Ver plot atual",
+    Callback = function()
+        local pos, src = getHome()
+        if pos then
+            notify("Plot", ("Fonte: %s (%d, %d, %d)"):format(src, pos.X, pos.Y, pos.Z))
+        else
+            notify("Plot", "Nenhum plot detectado.")
+        end
+    end,
+})
+
+Cf:Button({
+    Title = "Redetectar plot (reseta o personagem)",
+    Desc = "Você renasce no seu plot e o script registra o ponto.",
+    Callback = function()
+        S.Spawned = nil
+        S.ManualPlot = nil
+        local h = getHum()
+        if h then h.Health = 0 end
+        notify("Plot", "Resetando para registrar o spawn...")
+    end,
+})
+
+Cf:Button({
+    Title = "Salvar minha posição como plot",
+    Callback = function()
+        local hrp = getHRP()
+        if hrp then
+            S.ManualPlot = hrp.Position
+            notify("Plot", "Plot manual salvo.")
+        end
+    end,
+})
+
+Cf:Button({
+    Title = "Voltar pra detecção automática",
+    Callback = function()
+        S.ManualPlot = nil
+        notify("Plot", "Usando detecção automática.")
+    end,
+})
+
+Cf:Button({
+    Title = "Ir ao plot",
+    Callback = function()
+        task.spawn(function()
+            local pos = getHome()
+            if pos then flyTo(pos + Vector3.new(0, 3, 0)) else notify("Plot", "Nenhum plot detectado.") end
+        end)
+    end,
+})
+
+Cf:Slider({
+    Title = "Ignorar alvos perto do seu plot (raio, 0 = desliga)",
+    Step = 1,
+    Value = { Min = 0, Max = 200, Default = 45 },
+    Callback = function(v) S.Exclude = v end,
+})
+
+Cf:Section({ Title = "Farm" })
+
+Cf:Slider({
+    Title = "Intervalo do auto roubar (s)",
+    Step = 0.1,
+    Value = { Min = 0.2, Max = 10, Default = 1 },
+    Callback = function(v) S.Delay = v end,
+})
+
+Cf:Input({
+    Title = "Texto do botão do prompt de roubo",
+    Value = table.concat(S.ActionKeys, ","),
+    Placeholder = "roubar,steal",
+    Callback = function(text)
+        S.ActionKeys = {}
+        for w in tostring(text):gmatch("[^,]+") do
+            table.insert(S.ActionKeys, (w:gsub("^%s+", ""):gsub("%s+$", ""):lower()))
+        end
+    end,
+})
+
+Cf:Toggle({ Title = "Notificações", Value = true, Default = true, Callback = function(v) S.Notify = v end })
+
+Cf:Section({ Title = "Debug" })
+
+Cf:Button({
+    Title = "Copiar alvos detectados",
+    Callback = function()
+        local list = scanTargets()
+        sortTargets(list)
+        local out = {}
+        for _, t in ipairs(list) do
+            table.insert(out, ("%s | %s | %s | ⚡%s | %dm"):format(t.name, t.size, t.tier, fmt(t.income), t.dist))
+        end
+        copy(table.concat(out, "\n"))
+        notify("Debug", #list .. " alvo(s) copiado(s).")
+    end,
+})
+
+Cf:Button({
+    Title = "Copiar todos os prompts do mapa",
+    Callback = function()
+        local out = {}
+        for pr in pairs(Prompts) do
+            if pr.Parent then
+                table.insert(out, ("%s | Action=%s | Object=%s | Enabled=%s"):format(
+                    pr:GetFullName(), pr.ActionText, pr.ObjectText, tostring(pr.Enabled)))
+            end
+        end
+        copy(table.concat(out, "\n"))
+        notify("Debug", #out .. " prompts copiados.")
+    end,
+})
+
+Cf:Section({ Title = "Script" })
+
+local function unload()
+    S.Unloaded = true
+    S.AutoSteal, S.SpeedFarm, S.Fly, S.NoClip = false, false, false, false
+    S.Cancel = true
+    clearESP()
+    restorePrompts()
+    for k, val in pairs(origLight) do pcall(function() Lighting[k] = val end) end
+    workspace.Gravity = origGravity
+    for _, c in ipairs(Conns) do pcall(function() c:Disconnect() end) end
+    pcall(function() Window:Destroy() end)
+end
+pcall(function() getgenv().ExuUnload = unload end)
+
+Cf:Button({ Title = "Descarregar script", Callback = unload })
+
+Window:SelectTab(1)
